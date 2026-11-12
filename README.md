@@ -5,7 +5,11 @@ A C# source generator that turns the keys in your `.env` into a typed `Env` clas
 
 - adding a key to `.env` makes it available in code right away,
 - removing or renaming a key breaks the build everywhere it is used,
-- `env.Validate()` at startup stops the app if a required key is missing or a number isn't a number.
+- creating the `Env` at startup stops the app if a required value is missing or a number isn't a number.
+
+The compiler can only check key *names*, against your development `.env`. *Values* exist only at runtime: in
+production they come from real environment variables, which the build never sees. The `Env` constructor checks them, so
+create the `Env` at startup and a misconfigured deploy fails right away, listing every problem, instead of on first use.
 
 The development value in `.env` decides the type:
 
@@ -74,17 +78,24 @@ What each part does:
 ```csharp
 DotNetEnv.Env.NoClobber().TraversePath().Load(); // before CreateBuilder; real env vars (e.g. production secrets) win
 var builder = WebApplication.CreateBuilder(args);
-builder.Services.AddSingleton<Env>();
+var env = new Env(builder.Configuration); // throws here, at startup, if a required value is missing or malformed
+builder.Services.AddSingleton(env);
+
+// use it while configuring services...
+builder.Services.AddSingleton(new NpgsqlDataSourceBuilder(env.ConnectionStrings__Db).Build());
 
 var app = builder.Build();
-app.Services.GetRequiredService<Env>().Validate(); // fail at startup, not on first use
-
-// anywhere else: inject Env
+// ...or inject it anywhere
 app.MapGet("/", (Env env) => $"{env.PGHOST}:{env.PGPORT}");
 ```
 
-`Env` is generated in the project's root namespace and takes an `IConfiguration`, so it reads every configuration
-source ASP.NET Core sets up (environment variables, `appsettings.json`, ...).
+`Env` is generated in the project's root namespace, and the generated file adds a `global using` for that namespace.
+That makes `Env` available in every file, including a top-level `Program.cs`, without a `using`. It takes an
+`IConfiguration`, so it reads every configuration source ASP.NET Core sets up (environment variables,
+`appsettings.json`, ...).
+
+Create it yourself as shown, rather than only registering it with `AddSingleton<Env>()`. Dependency injection would
+create it on first use, which moves the check away from startup.
 
 Write the DotNetEnv call fully qualified as above, not with `using DotNetEnv;`. That namespace also has a class named
 `Env`, and the import would make `Env` ambiguous.
