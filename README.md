@@ -28,8 +28,9 @@ There is no NuGet package. The generator is a single DLL attached to each
 ```xml
 <!-- Typesafe.Env: generates a typed Env class from .env (https://github.com/uldahlalex/Typesafe.Env) -->
 <PropertyGroup>
-  <TypesafeEnvVersion>v1.0.0</TypesafeEnvVersion>
-  <TypesafeEnvDir>$(BaseIntermediateOutputPath)typesafe-env/$(TypesafeEnvVersion)/</TypesafeEnvDir>
+  <!-- Empty: always the latest release. A tag like v1.0.3: pinned to that release. -->
+  <TypesafeEnvVersion></TypesafeEnvVersion>
+  <TypesafeEnvRepo>https://github.com/uldahlalex/Typesafe.Env</TypesafeEnvRepo>
 </PropertyGroup>
 <ItemGroup>
   <PackageReference Include="DotNetEnv" Version="3.2.0" />
@@ -38,19 +39,33 @@ There is no NuGet package. The generator is a single DLL attached to each
   <AdditionalFiles Include="$(MSBuildProjectDirectory)/../.env" Condition="Exists('$(MSBuildProjectDirectory)/../.env')" />
 </ItemGroup>
 <Target Name="TypesafeEnv" BeforeTargets="CoreCompile">
-  <DownloadFile Condition="!Exists('$(TypesafeEnvDir)Typesafe.Env.Generator.dll')"
-                SourceUrl="https://github.com/uldahlalex/Typesafe.Env/releases/download/$(TypesafeEnvVersion)/Typesafe.Env.Generator.dll"
-                DestinationFolder="$(TypesafeEnvDir)" />
+  <PropertyGroup>
+    <_TypesafeEnvLatest>$([System.String]::IsNullOrEmpty('$(TypesafeEnvVersion)'))</_TypesafeEnvLatest>
+    <_TypesafeEnvDir>$(BaseIntermediateOutputPath)typesafe-env/$(TypesafeEnvVersion)/</_TypesafeEnvDir>
+    <_TypesafeEnvDir Condition="$(_TypesafeEnvLatest)">$(BaseIntermediateOutputPath)typesafe-env/latest/</_TypesafeEnvDir>
+    <_TypesafeEnvUrl>$(TypesafeEnvRepo)/releases/download/$(TypesafeEnvVersion)/Typesafe.Env.Generator.dll</_TypesafeEnvUrl>
+    <_TypesafeEnvUrl Condition="$(_TypesafeEnvLatest)">$(TypesafeEnvRepo)/releases/latest/download/Typesafe.Env.Generator.dll</_TypesafeEnvUrl>
+    <_TypesafeEnvCached>$([System.IO.File]::Exists('$(_TypesafeEnvDir)Typesafe.Env.Generator.dll'))</_TypesafeEnvCached>
+  </PropertyGroup>
+  <!-- Pinned: download once. Latest: check every build (only re-downloads when it changed), and fall back to the
+       cached copy with a warning when offline. -->
+  <DownloadFile Condition="$(_TypesafeEnvLatest) Or !$(_TypesafeEnvCached)"
+                SourceUrl="$(_TypesafeEnvUrl)" DestinationFolder="$(_TypesafeEnvDir)"
+                ContinueOnError="$(_TypesafeEnvCached)" />
   <ItemGroup>
-    <Analyzer Include="$(TypesafeEnvDir)Typesafe.Env.Generator.dll" />
+    <Analyzer Include="$(_TypesafeEnvDir)Typesafe.Env.Generator.dll" />
   </ItemGroup>
 </Target>
 ```
 
 What each part does:
 
-- `TypesafeEnvVersion` is the release tag. To upgrade, change it and build again.
-- The first build downloads the DLL into `obj/typesafe-env/<version>/`. Later builds reuse it, so they work offline.
+- `TypesafeEnvVersion` picks the generator version:
+  - **Empty (the default): latest release.** Every build checks GitHub and downloads only when there is a newer
+    release. Offline, the build uses the cached copy and shows a warning (`MSB3923`).
+  - **A tag such as `v1.0.3`: pinned.** It is downloaded once, and later builds never touch the network. Pin in apps
+    that deploy to production, so a new release can't change a build of the same commit.
+- The DLL is cached in `obj/typesafe-env/latest/` or `obj/typesafe-env/<tag>/`.
 - `DotNetEnv` loads `.env` into the environment at runtime (see step 2). The generator itself only runs at build time.
 - The `.env` is picked up next to the project or one folder up (the repository root, for the usual `repo/src/App` layout).
 
@@ -90,7 +105,9 @@ In Rider or Visual Studio, `Env` shows up in IntelliSense after the first build 
 - **Only projects that see a `.env` get an `Env` class.** A test project that references the app doesn't get an empty
   duplicate.
 - **Typing is based on the development value.** Only digits count as numbers, so `-1` or `3.5` give a `string`.
-- **The downloaded DLL runs inside the compiler**, so only point `TypesafeEnvVersion` at releases you trust.
+- **The downloaded DLL runs inside the compiler**, so only point `TypesafeEnvRepo` at a repository you trust.
+- **The first build needs network access**, and so does every build of an app that uses the latest release. A fresh
+  CI or Docker build always downloads.
 
 ## Developing the generator
 
@@ -103,11 +120,17 @@ downloaded one.
 
 ### Releasing
 
-```bash
-git tag v1.0.1
-git push origin v1.0.1
-```
+Releases are automatic. Every push to `master` or `main` that changes `src/` (or the workflow) runs
+`.github/workflows/release.yml`, which:
 
-`.github/workflows/release.yml` builds the generator and creates a GitHub release with `Typesafe.Env.Generator.dll`
-attached. It uses the built-in `GITHUB_TOKEN`, so there are no keys to manage. Apps then switch by changing
-`TypesafeEnvVersion`.
+1. takes `ReleaseSeries` from `src/Typesafe.Env.Generator/Typesafe.Env.Generator.csproj` (e.g. `1.0`),
+2. finds the highest existing tag in that series and releases the next patch (`v1.0.0`, then `v1.0.1`, ...),
+3. creates the tag and a GitHub release with `Typesafe.Env.Generator.dll` attached.
+
+Apps on the latest release get it on their next build. Pinned apps update by changing `TypesafeEnvVersion`.
+
+- **README-only commits don't release**, because of the `paths` filter. To release anyway, run the workflow from the
+  repository's Actions tab.
+- **To start a new series**, for example after a breaking change, set `<ReleaseSeries>2.0</ReleaseSeries>` and push.
+  The next release is `v2.0.0`.
+- **No keys:** the workflow uses the built-in `GITHUB_TOKEN`.
